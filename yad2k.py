@@ -9,6 +9,7 @@ import argparse
 import configparser
 import io
 import os
+import struct
 from collections import defaultdict
 
 import numpy as np
@@ -79,9 +80,12 @@ def _main(args):
     # Load weights and config.
     print('Loading weights.')
     weights_file = open(weights_path, 'rb')
-    weights_header = np.ndarray(
-        shape=(4, ), dtype='int32', buffer=weights_file.read(16))
-    print('Weights Header: ', weights_header)
+    major, minor, revision = struct.unpack('iii', weights_file.read(12))
+    print('version={}.{}.{}'.format(major, minor, revision))
+    if major * 10 + minor >= 2:
+        seen = struct.unpack('N', weights_file.read(8))
+    else:
+        seen = struct.unpack('i', weights_file.read(4))
     # TODO: Check transpose flag when implementing fully connected layers.
     # transpose = (weight_header[0] > 1000) or (weight_header[1] > 1000)
 
