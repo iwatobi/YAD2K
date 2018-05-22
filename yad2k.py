@@ -15,9 +15,9 @@ from collections import defaultdict
 import numpy as np
 from keras import backend as K
 from keras.layers import (Conv2D, GlobalAveragePooling2D, Input, Lambda,
-                          MaxPooling2D)
+                          MaxPooling2D, Reshape, UpSampling2D, ZeroPadding2D)
 from keras.layers.advanced_activations import LeakyReLU
-from keras.layers.merge import concatenate
+from keras.layers.merge import add, concatenate
 from keras.layers.normalization import BatchNormalization
 from keras.models import Model
 from keras.regularizers import l2
@@ -102,6 +102,7 @@ def _main(args):
         image_width = int(cfg_parser['net_0']['width'])
     prev_layer = Input(shape=(image_height, image_width, 3))
     all_layers = [prev_layer]
+    outputs = []
 
     weight_decay = float(cfg_parser['net_0']['decay']
                          ) if 'net_0' in cfg_parser.sections() else 5e-4
@@ -116,8 +117,10 @@ def _main(args):
             activation = cfg_parser[section]['activation']
             batch_normalize = 'batch_normalize' in cfg_parser[section]
 
-            # padding='same' is equivalent to Darknet pad=1
-            padding = 'same' if pad == 1 else 'valid'
+            padding = 'same' if pad == 1 and stride == 1 else 'valid'
+            # Adjust padding model for darknet.
+            if stride == 2:
+                prev_layer = ZeroPadding2D(((1, 0), (1, 0)))(prev_layer)
 
             # Setting weights.
             # Darknet serializes convolutional weights as:
@@ -217,8 +220,41 @@ def _main(args):
             all_layers.append(GlobalAveragePooling2D()(prev_layer))
             prev_layer = all_layers[-1]
 
+        elif section.startswith('shortcut'):
+            frm = int(cfg_parser[section]['from'])
+            activation = cfg_parser[section]['activation']
+
+            if activation != 'linear':
+                raise ValueError(
+                    'Unknown activation function `{}` in section {}'.format(
+                        activation, section))
+
+            shortcut_layer = add([prev_layer, all_layers[frm]])
+            all_layers.append(shortcut_layer)
+            prev_layer = shortcut_layer
+
+        elif section.startswith('yolo'):
+            classes = int(cfg_parser[section]['classes'])
+
+            prev_layer_shape = K.int_shape(prev_layer)
+            h = prev_layer_shape[1]
+            w = prev_layer_shape[2]
+
+            yolo_layer = Reshape((h, w, 3, 4 + 1 + classes))(prev_layer)
+            all_layers.append(yolo_layer)
+            prev_layer = yolo_layer
+            outputs.append(yolo_layer)
+
+        elif section.startswith('upsample'):
+            stride = int(cfg_parser[section]['stride'])
+
+            upsample_layer = UpSampling2D(size=(stride, stride))(prev_layer)
+            all_layers.append(upsample_layer)
+            prev_layer = upsample_layer
+
         elif section.startswith('route'):
             ids = [int(i) for i in cfg_parser[section]['layers'].split(',')]
+            ids = [(i+1) if i > 0 else i for i in ids]
             layers = [all_layers[i] for i in ids]
             if len(layers) > 1:
                 print('Concatenating route layers:', layers)
@@ -253,7 +289,9 @@ def _main(args):
                 'Unsupported section header type: {}'.format(section))
 
     # Create and save model.
-    model = Model(inputs=all_layers[0], outputs=all_layers[-1])
+    if len(outputs) == 0:
+        outputs = [all_layers[-1]]
+    model = Model(inputs=all_layers[0], outputs=outputs)
     print(model.summary())
     model.save('{}'.format(output_path))
     print('Saved Keras model to {}'.format(output_path))
